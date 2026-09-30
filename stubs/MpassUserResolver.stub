@@ -1,0 +1,59 @@
+<?php
+
+namespace App\MPass;
+
+use Mpass\DefaultMpassUserResolver;
+use Mpass\SamlUser;
+use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Support\Facades\Hash;
+
+class MpassUserResolver extends DefaultMpassUserResolver
+{
+    /**
+     * Columns used to look up an existing user.
+     *
+     * The `idnp` column is REQUIRED in your users table — it stores the
+     * national ID number returned by MPass. Add it to your migration if missing:
+     *   $table->string('idnp')->unique();
+     *
+     * @return array<string, mixed>
+     */
+    protected function findBy(SamlUser $samlUser): array
+    {
+        return ['idnp' => $samlUser->nameId];
+    }
+
+    /**
+     * Attributes written only when creating a NEW user (first MPass login).
+     *
+     * Customize the fields below to match your users table schema.
+     * Available MPass attributes:
+     *   $samlUser->firstName()   — first name
+     *   $samlUser->lastName()    — last name
+     *   $samlUser->email()       — email address (may be null)
+     *   $samlUser->mobilePhone() — mobile phone (may be null)
+     *   $samlUser->nameId        — IDNP (national ID)
+     *
+     * @return array<string, mixed>
+     */
+    protected function newUserAttributes(SamlUser $samlUser): array
+    {
+        $password = bin2hex(random_bytes(16));
+
+        return [
+            // Adjust field names to match your users table columns:
+            'firstname' => $samlUser->firstName(),
+            'lastname'  => $samlUser->lastName(),
+            'email'     => $samlUser->email(),
+            'password'  => Hash::make($password),
+        ];
+    }
+
+    /**
+     * Return false to deny login (e.g. banned or inactive accounts).
+     */
+    protected function isAllowed(Authenticatable $user): bool
+    {
+        return true;
+    }
+}
