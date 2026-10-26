@@ -28,15 +28,26 @@ class MpassController extends Controller
      *
      * GET /auth/mpass/login
      */
-    public function login(Request $request): void
+    public function login(Request $request): RedirectResponse
     {
         // Pass an explicit returnTo so onelogin/php-saml does not fall back to
         // the current URL (/auth/mpass/login) as RelayState, which would cause
         // an infinite redirect loop after MPass sends the user back.
-        $returnTo = $request->query('return_to')
-            ?? url(config('mpass.redirects.after_login', '/'));
+        $returnTo = $request->query('return_to');
 
-        $this->mpass->login($returnTo);
+        if (!is_string($returnTo) || !$this->isSafeRedirect($returnTo)) {
+            $returnTo = url(config('mpass.redirects.after_login', '/'));
+        }
+
+        $url = $this->mpass->loginUrl($returnTo);
+
+        // Remembered so acs() only accepts the response to this very request.
+        $request->session()->put(
+            config('mpass.session.request_id', 'mpass_request_id'),
+            $this->mpass->getLastRequestId(),
+        );
+
+        return redirect()->away($url);
     }
 
     /**
@@ -47,7 +58,9 @@ class MpassController extends Controller
      */
     public function acs(Request $request): RedirectResponse
     {
-        $this->mpass->processResponse();
+        $requestId = $request->session()->pull(config('mpass.session.request_id', 'mpass_request_id'));
+
+        $this->mpass->processResponse(is_string($requestId) ? $requestId : null);
 
         $errors = $this->mpass->getErrors();
 
@@ -61,6 +74,12 @@ class MpassController extends Controller
             MpassLoginFailed::dispatch('User is not authenticated after processing SAML response.');
 
             return $this->failureRedirect('Authentication was cancelled or denied.');
+        }
+
+        if (!$this->mpass->markAssertionAsUsed()) {
+            MpassLoginFailed::dispatch('SAML assertion has already been used (possible replay).');
+
+            return $this->failureRedirect('Authentication failed. Please try again.');
         }
 
         $samlUser = new SamlUser(
@@ -144,8 +163,21 @@ class MpassController extends Controller
      */
     public function sls(Request $request): Response|RedirectResponse
     {
-        if ($request->has('SAMLRequest')) {
+        if ($request->query->has('SAMLRequest')) {
             return $this->handleInboundLogoutRequest($request);
+        }
+
+        // onelogin/php-saml validates SLO messages only in the HTTP-Redirect
+        // binding. A POSTed message cannot be verified, so it must not touch
+        // the local session.
+        if (!$request->query->has('SAMLResponse')) {
+            MpassLogoutFailed::dispatch('Unsupported SLO binding: only HTTP-Redirect is supported.');
+
+            if ($request->request->has('SAMLRequest')) {
+                return response('SLO error: unsupported binding', 400);
+            }
+
+            return redirect(config('mpass.redirects.after_logout', '/'));
         }
 
         $this->mpass->processSLO();
@@ -172,76 +204,55 @@ class MpassController extends Controller
 
     /**
      * When MPass initiates logout (e.g. from another SP), it sends a SAMLRequest
-     * to our SLS endpoint. We must terminate the local session and confirm.
+     * to our SLS endpoint. Once the request is validated we terminate the local
+     * session and answer MPass with a LogoutResponse.
      */
     private function handleInboundLogoutRequest(Request $request): Response|RedirectResponse
     {
-        ['nameId' => $nameId, 'sessionIndex' => $sessionIndex] =
-            $this->parseLogoutRequest($request->input('SAMLRequest', ''));
+        // onelogin checks the signature only when one is present; its
+        // wantMessagesSigned switch cannot be used because it would also
+        // demand a signed <Response> on login.
+        if (!$request->query->has('Signature')) {
+            MpassLogoutFailed::dispatch('SAML logout request is not signed.', ['unsigned_logout_request']);
 
-        if ($nameId) {
-            $this->terminateSessionForNameId($nameId, $sessionIndex);
+            return response('SLO error: unsigned_logout_request', 400);
         }
 
-        $this->mpass->processSLO();
+        $responseUrl = $this->mpass->processLogoutRequest(
+            fn (string $nameId, array $sessionIndexes) => $this->terminateSessionForNameId($request, $nameId, $sessionIndexes),
+        );
 
         $errors = $this->mpass->getErrors();
 
-        if (!empty($errors)) {
+        if (!empty($errors) || $responseUrl === null) {
+            MpassLogoutFailed::dispatch('SAML logout request was rejected.', $errors);
+
             return response('SLO error: ' . implode(', ', $errors), 400);
         }
 
         MpassLogoutCompleted::dispatch();
 
-        return redirect(config('mpass.redirects.after_logout', '/'));
+        return redirect()->away($responseUrl);
     }
 
     /**
-     * Extracts NameID and SessionIndex from a base64-encoded SAMLRequest XML.
+     * Terminate the current Laravel session if it belongs to the given NameID.
      *
-     * @return array{nameId: string|null, sessionIndex: string|null}
+     * @param list<string> $sessionIndexes
      */
-    private function parseLogoutRequest(string $encodedXml): array
+    private function terminateSessionForNameId(Request $request, string $nameId, array $sessionIndexes): void
     {
-        $xml = base64_decode($encodedXml);
+        $storedNameId = $request->session()->get(config('mpass.session.name_id', 'mpass_name_id'));
 
-        if (!$xml) {
-            return ['nameId' => null, 'sessionIndex' => null];
+        if ($storedNameId === null || !hash_equals((string) $storedNameId, $nameId)) {
+            return;
         }
 
-        // Strip namespace prefixes so SimpleXML can traverse nodes uniformly.
-        $xml  = preg_replace('/(<\/?)(\w+):([^>]*>)/', '$1$2$3', $xml);
-        $node = @simplexml_load_string($xml);
+        MpassLogoutInitiated::dispatch(Auth::user(), $nameId, $sessionIndexes[0] ?? null);
 
-        if (!$node) {
-            return ['nameId' => null, 'sessionIndex' => null];
-        }
-
-        $data = json_decode(json_encode($node), true);
-
-        return [
-            'nameId'       => $data['samlNameID'] ?? null,
-            'sessionIndex' => $data['samlpSessionIndex'] ?? null,
-        ];
-    }
-
-    /** Terminate the Laravel session that belongs to the given NameID. */
-    private function terminateSessionForNameId(string $nameId, ?string $sessionIndex): void
-    {
-        MpassLogoutInitiated::dispatch(null, $nameId, $sessionIndex);
-
-        $sessionStore = app('session');
-        $currentId    = $sessionStore->getId();
-        $handler      = $sessionStore->getHandler();
-
-        $raw  = $handler->read($currentId);
-        $data = $raw ? @unserialize($raw) : [];
-
-        $storedNameId = $data[config('mpass.session.name_id', 'mpass_name_id')] ?? null;
-
-        if ($storedNameId === $nameId) {
-            $handler->destroy($currentId);
-        }
+        Auth::logout();
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
     }
 
     private function resolveUser(SamlUser $samlUser): ?Authenticatable
@@ -252,7 +263,7 @@ class MpassController extends Controller
     /**
      * Validate that RelayState is safe to redirect to:
      * - must differ from the current ACS URL (avoid redirect loops)
-     * - must start with the application URL (prevent open redirect)
+     * - must stay on the application (prevent open redirect)
      * - must not point to a logout endpoint
      */
     private function isSafeRelayState(string $relayState, string $selfUrl): bool
@@ -262,10 +273,8 @@ class MpassController extends Controller
             return false;
         }
 
-        $appUrl = rtrim(config('app.url', ''), '/');
-
         // Reject external URLs to prevent open redirect attacks.
-        if ($appUrl && !str_starts_with($relayState, $appUrl)) {
+        if (!$this->isSafeRedirect($relayState)) {
             return false;
         }
 
@@ -285,6 +294,40 @@ class MpassController extends Controller
         }
 
         return true;
+    }
+
+    /**
+     * Accept only a local path ("/dashboard") or an absolute URL whose scheme,
+     * host and port match APP_URL. A prefix check is not enough:
+     * "https://app.example.com.evil.com" and "https://app.example.com@evil.com"
+     * both start with "https://app.example.com".
+     */
+    private function isSafeRedirect(string $url): bool
+    {
+        // Browsers treat a backslash like "/" and strip control characters and
+        // whitespace, which turns e.g. "/\evil.com" into a protocol-relative URL.
+        if ($url === '' || preg_match('/[\\\\\x00-\x20\x7F]/', $url)) {
+            return false;
+        }
+
+        if (str_starts_with($url, '/')) {
+            return !str_starts_with($url, '//');
+        }
+
+        $target = parse_url($url);
+        $app    = parse_url((string) config('app.url', ''));
+
+        if (!$target || !$app || empty($app['host']) || empty($target['host'])) {
+            return false;
+        }
+
+        if (isset($target['user']) || isset($target['pass'])) {
+            return false;
+        }
+
+        return strtolower($target['scheme'] ?? '') === strtolower($app['scheme'] ?? '')
+            && strtolower($target['host']) === strtolower($app['host'])
+            && ($target['port'] ?? null) === ($app['port'] ?? null);
     }
 
     private function failureRedirect(string $message): RedirectResponse

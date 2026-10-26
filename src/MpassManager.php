@@ -3,6 +3,7 @@
 namespace Mpass;
 
 use OneLogin\Saml2\Auth;
+use OneLogin\Saml2\LogoutRequest;
 use OneLogin\Saml2\Settings;
 
 /**
@@ -30,12 +31,54 @@ class MpassManager
     }
 
     /**
+     * Build the MPass SSO URL without redirecting. Store getLastRequestId() in
+     * the session and pass it to processResponse() to enforce InResponseTo.
+     */
+    public function loginUrl(?string $returnTo = null): string
+    {
+        return $this->saml->login($returnTo, [], false, false, true);
+    }
+
+    /** ID of the last AuthnRequest built by login() / loginUrl(). */
+    public function getLastRequestId(): ?string
+    {
+        return $this->saml->getLastRequestID();
+    }
+
+    /**
      * Process the ACS (Assertion Consumer Service) POST from MPass.
      * Call getErrors() and isAuthenticated() after this to check the result.
+     *
+     * When $requestId is given, a response whose InResponseTo differs is rejected.
      */
-    public function processResponse(): void
+    public function processResponse(?string $requestId = null): void
     {
-        $this->saml->processResponse();
+        $this->saml->processResponse($requestId);
+    }
+
+    /**
+     * Record the assertion of the last processed response as consumed.
+     *
+     * Returns false if the same assertion was already used (replay attack).
+     * The ID is kept until the assertion expires, after which onelogin rejects
+     * it on its own.
+     */
+    public function markAssertionAsUsed(): bool
+    {
+        $assertionId = $this->saml->getLastAssertionId();
+
+        if (!$assertionId) {
+            return false;
+        }
+
+        $expiresAt = $this->saml->getLastAssertionNotOnOrAfter() ?? time() + 3600;
+
+        // Keep the ID a little past expiry to cover onelogin's allowed clock drift.
+        $ttl = max($expiresAt - time(), 0) + 300;
+
+        return app('cache')
+            ->store($this->config['replay_cache_store'] ?? null)
+            ->add('mpass:assertion:' . hash('sha256', $assertionId), true, $ttl);
     }
 
     /** Initiate a SAML Single Logout request toward MPass. */
@@ -63,6 +106,28 @@ class MpassManager
     public function processSLO(): void
     {
         $this->saml->processSLO();
+    }
+
+    /**
+     * Validate an inbound HTTP-Redirect LogoutRequest from MPass.
+     *
+     * $onValid(string $nameId, list<string> $sessionIndexes) runs only after the
+     * request (including its signature) has been validated. Returns the URL that
+     * carries the LogoutResponse back to MPass, or null when validation failed —
+     * see getErrors().
+     */
+    public function processLogoutRequest(callable $onValid): ?string
+    {
+        $callback = function () use ($onValid): void {
+            $xml = $this->saml->getLastRequestXML();
+
+            $onValid(
+                LogoutRequest::getNameId($xml, $this->saml->getSettings()->getSPkey()),
+                LogoutRequest::getSessionIndexes($xml),
+            );
+        };
+
+        return $this->saml->processSLO(false, null, false, $callback, true);
     }
 
     public function getErrors(): array
