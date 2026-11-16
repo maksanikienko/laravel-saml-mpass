@@ -10,8 +10,12 @@ use Illuminate\Support\Facades\Facade;
 
 /**
  * @method static void        login(?string $returnTo = null)
- * @method static void        processResponse()
+ * @method static string      loginUrl(?string $returnTo = null)
+ * @method static string|null getLastRequestId()
+ * @method static void        processResponse(?string $requestId = null)
+ * @method static bool        markAssertionAsUsed()
  * @method static void        processSLO()
+ * @method static string|null processLogoutRequest(callable $onValid)
  * @method static void        logout(?string $returnTo, string $nameId, string $sessionIndex)
  * @method static array       getErrors()
  * @method static bool        isAuthenticated()

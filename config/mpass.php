@@ -87,6 +87,21 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Replay Protection
+    |--------------------------------------------------------------------------
+    |
+    | IDs of consumed assertions are cached until they expire so that a
+    | captured SAML Response cannot be posted to the ACS a second time.
+    | Use a store shared by all app servers (redis, database, ...); the
+    | "array" store does not persist between requests and offers no protection.
+    | null uses the default cache store.
+    |
+    */
+
+    'replay_cache_store' => env('MPASS_REPLAY_CACHE_STORE'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Package Routes
     |--------------------------------------------------------------------------
     |
@@ -123,7 +138,7 @@ return [
     |--------------------------------------------------------------------------
     |
     | Keys under which MPass session data (NameID and its Format/qualifiers,
-    | SessionIndex) are stored
+    | SessionIndex, pending AuthnRequest ID) are stored
     | in the Laravel session. You may change them to avoid conflicts.
     |
     */
@@ -134,6 +149,7 @@ return [
         'name_id_format' => 'mpass_name_id_format',
         'name_id_name_qualifier' => 'mpass_name_id_name_qualifier',
         'name_id_sp_name_qualifier' => 'mpass_name_id_sp_name_qualifier',
+        'request_id'    => 'mpass_request_id',
     ],
 
     /*

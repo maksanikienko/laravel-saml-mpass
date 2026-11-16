@@ -251,6 +251,17 @@ The easiest way to provide these to MPass is to expose the SP Metadata XML (see 
 
 ---
 
+## Security
+
+The package applies the following protections on top of `onelogin/php-saml` (signature, Destination, Audience and validity-window checks):
+
+- **Redirect targets.** `return_to` on `/auth/mpass/login` and the `RelayState` coming back to the ACS must be a local path (`/dashboard`) or an absolute URL whose scheme, host and port match `APP_URL`. Anything else falls back to `redirects.after_login`.
+- **Solicited responses.** The ID of the AuthnRequest sent by `/auth/mpass/login` is stored in the session; a response whose `InResponseTo` does not match is rejected. If you use your own login route, call `Mpass::loginUrl()` and store `Mpass::getLastRequestId()` under the `session.request_id` key yourself.
+- **Replay protection.** Every consumed assertion ID is cached until the assertion expires, and a second use is rejected. Use a cache store shared by all app servers (`MPASS_REPLAY_CACHE_STORE`); the `array` store gives no protection.
+- **Single Logout.** An inbound `LogoutRequest` must be signed by MPass and terminates the local session only after onelogin has validated it, and only if its NameID matches the current session. `onelogin/php-saml` validates SLO messages only in the HTTP-Redirect binding; POSTed SLO messages are rejected without touching the session.
+
+---
+
 ## Events
 
 | Event | Payload | Fired when |
@@ -259,7 +270,7 @@ The easiest way to provide these to MPass is to expose the SP Metadata XML (see 
 | `MpassLoginFailed`     | `$reason`, `$errors` | Authentication failed at any step. |
 | `MpassLogoutInitiated` | `$user`, `$nameId`, `$sessionIndex` | SLO redirect to MPass is about to happen. |
 | `MpassLogoutCompleted` | — | SLS callback processed, session terminated. |
-| `MpassLogoutFailed`    | `$reason`, `$errors` | MPass answered the logout with an error or non-success status (e.g. its session already expired). The local session is already terminated; the user is redirected to `redirects.after_logout`. |
+| `MpassLogoutFailed`    | `$reason`, `$errors` | MPass answered the logout with an error or non-success status (e.g. its session already expired) — the local session is already terminated and the user is redirected to `redirects.after_logout`; or an inbound SLO message was rejected (invalid signature, unsupported binding). |
 
 Example — activity logging:
 
