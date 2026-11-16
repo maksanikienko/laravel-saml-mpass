@@ -1,7 +1,14 @@
 {
     "name": "maksanikienko/laravel-saml-mpass",
     "description": "Laravel package for SAML 2.0 authentication via MPass — the Republic of Moldova government SSO/SLO service.",
-    "keywords": ["laravel", "saml", "mpass", "sso", "authentication", "moldova"],
+    "keywords": [
+        "laravel",
+        "saml",
+        "mpass",
+        "sso",
+        "authentication",
+        "moldova"
+    ],
     "license": "MIT",
     "type": "library",
     "authors": [
@@ -18,9 +25,19 @@
         "illuminate/cache": "^9.0|^10.0|^11.0|^12.0|^13.0",
         "onelogin/php-saml": "^4.3.2"
     },
+    "require-dev": {
+        "orchestra/testbench": "^8.0|^9.0|^10.0|^11.0",
+        "phpunit/phpunit": "^10.5|^11.0|^12.0|^13.0",
+        "mockery/mockery": "^1.6"
+    },
     "autoload": {
         "psr-4": {
             "Mpass\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Mpass\\Tests\\": "tests/"
         }
     },
     "extra": {
@@ -34,5 +51,8 @@
         }
     },
     "minimum-stability": "stable",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "scripts": {
+        "test": "phpunit"
+    }
 }
