@@ -25,7 +25,7 @@ abstract class ControllerTestCase extends TestCase
 
     protected function makeUser(int $id = 1): GenericUser
     {
-        return new GenericUser(['id' => $id, 'name' => 'Ion Popescu', 'remember_token' => null]);
+        return new GenericUser(['id' => $id, 'name' => 'Ion Popescu', 'password' => '', 'remember_token' => null]);
     }
 
     /** Bind a resolver that returns $user and records the SamlUser it got. */
